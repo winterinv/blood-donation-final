@@ -217,29 +217,34 @@ async function submitNewRequest() {
             hospital_id: window.CURRENT_HOSPITAL_ID,
             blood_group: bg,
             units_required: units,
-            priority_level: prio || 'Normal',
-            status: 'PENDING'
+            priority_level: prio || 'Routine',
+            status: 'pending'
         }).select().single();
 
         if (insertErr || !newReq) throw new Error(insertErr?.message || "Failed to create request");
 
-        // Step 2: Offload matcher execution natively up to Node.js Backend 
-        const { data: { session } } = await supabase.auth.getSession();
-        const response = await fetch('http://localhost:5050/api/match', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${session?.access_token || ''}`
-            },
-            body: JSON.stringify({ request_id: newReq.id })
-        });
+        // Step 2: Offload matcher execution natively up to Node.js Backend ONLY if Urgent/Emergency
+        if (prio === 'Urgent' || prio === 'Emergency') {
+            const { data: { session } } = await supabase.auth.getSession();
+            const response = await fetch('http://localhost:5050/api/match', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${session?.access_token || ''}`
+                },
+                body: JSON.stringify({ request_id: newReq.id })
+            });
 
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || "Backend matching failure");
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.error || "Backend matching failure");
+            alert("Emergency request generated and automatically matched!");
+        } else {
+            alert("Routine request successfully broadcasted to the open network! Any hospital can now fulfill it.");
+        }
 
         document.getElementById('reqBloodGroup').value = "";
         document.getElementById('reqUnits').value = "";
-        alert("Request generated and matched through Node Backend!");
+        
         loadMyRequests();
     } catch (err) {
         alert("Application Engine Error: " + err.message);
@@ -278,10 +283,10 @@ async function loadMyRequests() {
 
     console.log("Fetching requests for hospital:", window.CURRENT_HOSPITAL_ID);
 
-    // Explicit Step 2: Simplify query to avert 400 nested relationship syntax mapping errors
+    // Explicit Step 2: Properly fetch the nested relationships
     const { data: requests, error } = await supabase
         .from("blood_requests")
-        .select('*')
+        .select('*, request_allocations(*, hospitals:supplier_hospital_id(name))')
         .eq("hospital_id", window.CURRENT_HOSPITAL_ID)
         .order("created_at", { ascending: false });
 
@@ -358,40 +363,143 @@ async function loadIncomingRequests() {
     const tbody = document.getElementById("incomingRequestsBody");
     if (!tbody) return;
 
-    console.log("Fetching incoming allocations for hospital:", window.CURRENT_HOSPITAL_ID);
+    console.log("Fetching global network requests...");
 
     const { data: incoming, error } = await supabase
         .from('blood_requests')
         .select('*')
-        .eq('hospital_id', window.CURRENT_HOSPITAL_ID)
-        .eq('status', 'PENDING');
+        .eq('status', 'pending')
+        .neq('hospital_id', window.CURRENT_HOSPITAL_ID);
 
     if (error) {
-        console.error("INCOMING ALLOCATIONS FETCH ERROR:", error);
-        return (tbody.innerHTML = `<tr><td colspan="5" style="text-align:center; color:red;">Failed to load.</td></tr>`);
+        console.error("GLOBAL REQUESTS FETCH ERROR:", error);
+        return (tbody.innerHTML = `<tr><td colspan="5" style="text-align:center; color:red;">Failed to load global requests.</td></tr>`);
     }
 
     if (!incoming || incoming.length === 0) {
-        return (tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;">No pending requests.</td></tr>`);
+        return (tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;">No open network requests.</td></tr>`);
+    }
+
+    const reqHospIds = incoming.map(i => i.hospital_id).filter(Boolean);
+    let hMap = {};
+    if (reqHospIds.length > 0) {
+        const { data: hData } = await supabase.from('hospitals').select('id, name').in('id', Array.from(new Set(reqHospIds)));
+        if (hData) hData.forEach(h => hMap[h.id] = h.name);
     }
 
     tbody.innerHTML = "";
-    incoming.forEach(i => {
+    incoming.forEach(req => {
+        const receiverName = req.hospital_id ? hMap[req.hospital_id] : 'Unknown Hospital';
         tbody.innerHTML += `
             <tr>
-                <td><strong>${i.id}</strong></td>
-                <td><span style="color:#ff4757; font-weight:bold;">${i.blood_group}</span></td>
-                <td><strong>${i.units_required}</strong> units</td>
-                <td><span style="color:#facc15;">${i.status}</span></td>
+                <td><span style="color:#20e3b2; font-weight:bold;">${receiverName}</span></td>
+                <td><span style="color:#ff4757; font-weight:bold;">${req.blood_group || 'Unknown'}</span></td>
+                <td><strong>${req.units_required}</strong> units</td>
+                <td><span style="color:#facc15;">${req.priority_level}</span></td>
+                <td>
+                    <button style="background:#10b981; border:none; color:white; padding:4px 8px; border-radius:4px; cursor:pointer;" onclick="fulfillGlobalRequest('${req.id}')">FULFILL REQUEST</button>
+                </td>
             </tr>
         `;
     });
 }
 
+window.fulfillGlobalRequest = async function(reqId) {
+    if (!confirm("Are you sure you want to fulfill this request using your own inventory?")) return;
+    
+    try {
+        const { data: { session } } = await supabase.auth.getSession();
+        const res = await fetch('http://localhost:5050/api/match/fulfill-global', {
+            method: 'POST',
+            headers: { 
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${session?.access_token || ''}`
+            },
+            body: JSON.stringify({
+                request_id: reqId,
+                supplier_hospital_id: window.CURRENT_HOSPITAL_ID
+            })
+        });
+        const data = await res.json();
+        
+        if (!res.ok) throw new Error(data.error || 'Server error');
+        
+        alert("Success! You have fulfilled the request. The transfer is now IN_TRANSIT.");
+        loadIncomingRequests();
+        loadTransactionsData();
+    } catch (e) {
+        alert("Failed to fulfill: " + e.message);
+    }
+}
+
 // ----------------------------------------------------
 // 5. Transactions Logic
 // ----------------------------------------------------
-function initTransactions() { }
+function initTransactions() {
+    window.downloadPDF = (transferId, date, sender, receiver, bg, units, status) => {
+        const safeSender = decodeURIComponent(sender);
+        const safeReceiver = decodeURIComponent(receiver);
+        const printWindow = window.open('', '_blank');
+        printWindow.document.write(`
+            <html><head><title>Transfer Receipt</title>
+            <style>
+                body { font-family: Arial, sans-serif; padding: 40px; color: #333; }
+                .header { border-bottom: 2px solid #20e3b2; padding-bottom: 20px; margin-bottom: 30px; }
+                h1 { color: #ff4757; margin:0; }
+                .row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #eee; }
+                .label { font-weight: bold; color: #666; }
+            </style>
+            </head><body>
+            <div class="header">
+                <h1>Blood Buddy - Transfer Document</h1>
+                <p>Official Transaction Receipt</p>
+            </div>
+            <div class="row"><span class="label">Transfer ID</span><span>${transferId}</span></div>
+            <div class="row"><span class="label">Date</span><span>${date}</span></div>
+            <div class="row"><span class="label">Sender Hospital</span><span>${safeSender}</span></div>
+            <div class="row"><span class="label">Receiver Hospital</span><span>${safeReceiver}</span></div>
+            <div class="row"><span class="label">Blood Group</span><span style="font-size:20px; font-weight:bold; color:#ff4757;">${bg}</span></div>
+            <div class="row"><span class="label">Units</span><span>${units}</span></div>
+            <div class="row"><span class="label">Status</span><span>${status}</span></div>
+            <div style="margin-top: 50px; text-align:center; font-size:12px; color:#999;">
+                System Generated Document - Blood Donation Network
+            </div>
+            <script>
+                window.onload = function() { window.print(); }
+            </script>
+            </body></html>
+        `);
+        printWindow.document.close();
+    };
+
+    window.markReceived = async (transferId, bloodGroup, units) => {
+        if (!confirm(`Mark ${units} units of ${bloodGroup} as physically received and add to inventory?`)) return;
+        
+        // 1. Update transfer status
+        const { error: txErr } = await supabase.from('blood_transfers')
+            .update({ status: 'COMPLETED' })
+            .eq('id', transferId);
+        if (txErr) return alert("Error updating transfer: " + txErr.message);
+
+        // 2. Add to inventory
+        const expiry = new Date();
+        expiry.setDate(expiry.getDate() + 35);
+
+        const { error: invErr } = await supabase.from('inventory_batches')
+            .insert({
+                hospital_id: window.CURRENT_HOSPITAL_ID,
+                blood_group: bloodGroup,
+                units: units,
+                reserved_units: 0,
+                expiry_date: expiry.toISOString(),
+                is_recalled: false
+            });
+        if (invErr) return alert("Error adding to inventory: " + invErr.message);
+
+        alert("Successfully received! Stock has been added to your inventory.");
+        loadTransactionsData();
+    };
+}
 
 async function loadTransactionsData() {
     const tbody = document.getElementById("transactionsBody");
@@ -408,10 +516,18 @@ async function loadTransactionsData() {
     }
 
     const hSet = new Set();
-    txs.forEach(t => { hSet.add(t.sender_id); hSet.add(t.receiver_id); });
-    const { data: hData } = await supabase.from('hospitals').select('id, name').in('id', Array.from(hSet));
+    txs.forEach(t => { 
+        if (t.sender_id) hSet.add(t.sender_id); 
+        if (t.receiver_id) hSet.add(t.receiver_id); 
+    });
+    
+    const validIds = Array.from(hSet);
     const hMap = {};
-    if (hData) hData.forEach(h => hMap[h.id] = h.name);
+    
+    if (validIds.length > 0) {
+        const { data: hData } = await supabase.from('hospitals').select('id, name').in('id', validIds);
+        if (hData) hData.forEach(h => hMap[h.id] = h.name);
+    }
 
     tbody.innerHTML = "";
 
@@ -440,7 +556,10 @@ async function loadTransactionsData() {
                 <td>${!isSender ? '<span style="color:#20e3b2;">(You)</span>' : theirName}</td>
                 <td><strong style="color:white;">${t.blood_group}</strong> (${t.units}u)</td>
                 <td><strong style="color:${statColor};">${t.status}</strong></td>
-                <td><button style="background:transparent; border:1px solid white; color:white; font-size:11px; padding:2px 6px; cursor:pointer;">PDF</button></td>
+                <td>
+                    <button style="background:transparent; border:1px solid white; color:white; font-size:11px; padding:2px 6px; cursor:pointer;" onclick="downloadPDF('${t.id}', '${new Date(t.created_at).toLocaleDateString()}', encodeURIComponent('${(hMap[t.sender_id] || 'Unknown').replace(/'/g, "\\'")}'), encodeURIComponent('${(hMap[t.receiver_id] || 'Unknown').replace(/'/g, "\\'")}'), '${t.blood_group}', ${t.units}, '${t.status}')">PDF</button>
+                    ${(!isSender && t.status === 'IN_TRANSIT') ? `<button style="background:#20e3b2; border:none; color:black; font-weight:bold; font-size:11px; padding:3px 8px; border-radius:4px; cursor:pointer; margin-left:5px;" onclick="markReceived('${t.id}', '${t.blood_group}', ${t.units})">Receive 📥</button>` : ''}
+                </td>
             </tr>
         `;
     });

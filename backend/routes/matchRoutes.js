@@ -137,15 +137,20 @@ router.post('/', async (req, res) => {
 
         // 5. RANKING SORT MECHANISMS
         sortedCandidates.sort((a, b) => {
-            if (a.distance !== b.distance) return a.distance - b.distance;
-            return b.available_units - a.available_units;
+            if (v_req.priority_level === 'Urgent' || v_req.priority_level === 'Emergency') {
+                if (b.available_units !== a.available_units) return b.available_units - a.available_units;
+                return a.distance - b.distance;
+            } else {
+                if (a.distance !== b.distance) return a.distance - b.distance;
+                return b.available_units - a.available_units;
+            }
         });
 
         // 6. TOP 10 ISOLATION
         const top10 = sortedCandidates.slice(0, 10);
 
         // 7. CORRECT ALLOCATION DISTRIBUTION ACROSS BATCHES
-        const insertions = [];
+        const insertionsMap = new Map();
 
         for (const candidate of top10) {
             if (v_remaining_units <= 0) break;
@@ -161,19 +166,26 @@ router.post('/', async (req, res) => {
                 const take_from_batch = Math.min(batch_supply_capable, hospital_takes_total);
                 if (take_from_batch <= 0) continue;
 
-                insertions.push({
-                    request_id: request_id,
-                    supplier_id: candidate.hospital_id,
-                    batch_id: batch.id,
-                    units_allocated: take_from_batch,
-                    status: 'PENDING'
-                });
+                const key = `${request_id}_${candidate.hospital_id}`;
+                if (!insertionsMap.has(key)) {
+                    insertionsMap.set(key, {
+                        request_id: request_id,
+                        supplier_id: candidate.hospital_id,
+                        batch_id: batch.id,
+                        units_allocated: 0,
+                        status: 'PENDING'
+                    });
+                }
+
+                insertionsMap.get(key).units_allocated += take_from_batch;
 
                 hospital_takes_total -= take_from_batch;
                 v_remaining_units -= take_from_batch;
                 v_allocated_total += take_from_batch;
             }
         }
+
+        const insertions = Array.from(insertionsMap.values());
 
         let newAllocs = [];
 
@@ -187,22 +199,103 @@ router.post('/', async (req, res) => {
             newAllocs = dbAllocs;
         }
 
+        // --- NEW AUTO-DEDUCT LOGIC FOR URGENT / EMERGENCY ---
+        if (v_req.priority_level === 'Urgent' || v_req.priority_level === 'Emergency') {
+            for (const alloc of newAllocs) {
+                const { error: rpcErr } = await userSupabase.rpc('rpc_accept_allocation', { p_id: alloc.id });
+                if (rpcErr) console.error("Auto-accept failed for alloc:", alloc.id, rpcErr);
+            }
+        }
+
         if (v_remaining_units <= 0) {
             await userSupabase.from('blood_requests').update({ status: 'FULFILLED' }).eq('id', request_id);
         } else if (v_allocated_total > 0) {
             await userSupabase.from('blood_requests').update({ status: 'PARTIAL' }).eq('id', request_id);
         }
 
-        res.json({
-            request_id,
-            allocated: v_allocated_total,
-            remaining: v_remaining_units,
-            insertions: newAllocs.length
-        });
-
+       return res.json({
+        success: true,
+        message: "Match Engine Executed",
+        allocations_created: newAllocs.length,
+        allocations: newAllocs
+    });
     } catch (err) {
         console.error("Match Engine Node Trace Error:", err.message);
         res.status(500).json({ error: "Backend Node Execute Crash: " + err.message });
+    }
+});
+
+// POST /api/match/fulfill-global
+router.post('/fulfill-global', async (req, res) => {
+    const { request_id, supplier_hospital_id } = req.body;
+    try {
+        const authHeader = req.headers['authorization'] || req.headers['Authorization'];
+        let client = supabase;
+        if (authHeader) {
+            const token = authHeader.replace("Bearer ", "");
+            client = createClient(
+                "https://bzrxpejjfzlecpugylqx.supabase.co",
+                "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ6cnhwZWpqZnpsZWNwdWd5bHF4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjkyNTkxNjksImV4cCI6MjA4NDgzNTE2OX0.tS3GgxA5L969XGQK9Uw4qxTcqco1Y2iytoKcfos0DNU",
+                { global: { headers: { Authorization: `Bearer ${token}` } } }
+            );
+        }
+
+        const { data: bReq } = await client.from('blood_requests').select('*').eq('id', request_id).single();
+        if (!bReq || bReq.status !== 'pending') return res.status(400).json({error: 'Request is no longer pending.'});
+
+        const { data: inv } = await client.from('inventory_batches')
+            .select('*')
+            .eq('hospital_id', supplier_hospital_id)
+            .eq('blood_group', bReq.blood_group)
+            .eq('is_recalled', false)
+            .gte('expiry_date', new Date().toISOString());
+
+        let available = 0;
+        let validBatches = [];
+        if (inv) {
+            inv.forEach(b => {
+                const avail = b.units - (b.reserved_units || 0);
+                if (avail > 0) {
+                    available += avail;
+                    validBatches.push({ ...b, avail });
+                }
+            });
+        }
+
+        if (available < bReq.units_required) {
+            return res.status(400).json({error: `You do not have enough ${bReq.blood_group} to fulfill this request. You need ${bReq.units_required} units.`});
+        }
+
+        validBatches.sort((a,b) => new Date(a.expiry_date) - new Date(b.expiry_date));
+        
+        let remaining = bReq.units_required;
+        let allocations = [];
+        
+        for (const b of validBatches) {
+            if (remaining <= 0) break;
+            const take = Math.min(b.avail, remaining);
+            remaining -= take;
+            
+            allocations.push({
+                request_id: request_id,
+                supplier_hospital_id: supplier_hospital_id,
+                batch_id: b.id,
+                units_allocated: take,
+                status: 'PENDING'
+            });
+        }
+        
+        const { data: inserted, error: insertErr } = await client.from('request_allocations').insert(allocations).select();
+        if (insertErr) throw insertErr;
+        
+        for (const alloc of inserted) {
+            await client.rpc('rpc_accept_allocation', { p_id: alloc.id });
+        }
+        
+        res.json({ success: true, message: 'Request fulfilled globally!' });
+    } catch (e) {
+        console.error("Global fulfill error:", e);
+        res.status(500).json({error: 'Server error: ' + e.message});
     }
 });
 

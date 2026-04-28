@@ -12,6 +12,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     console.log("Admin Dashboard initializing...");
     try {
+        await loadGlobalInventory();
+    } catch (e) {
+        console.error("loadGlobalInventory failed:", e);
+    }
+    try {
+        await loadPendingTransfers();
+    } catch (e) {
+        console.error("loadPendingTransfers failed:", e);
+    }
+    try {
         await loadPendingApprovals();
     } catch (e) {
         console.error("loadPendingApprovals failed:", e);
@@ -255,11 +265,39 @@ async function loadHospitals() {
         return;
     }
 
+    // Fetch all active inventory to aggregate stock per hospital
+    const { data: batches } = await supabase
+        .from('inventory_batches')
+        .select('hospital_id, blood_group, units, reserved_units')
+        .eq('is_recalled', false)
+        .gte('expiry_date', new Date().toISOString());
+
+    const stockMap = {};
+    if (batches) {
+        batches.forEach(b => {
+            const avail = (b.units || 0) - (b.reserved_units || 0);
+            if (avail > 0) {
+                if (!stockMap[b.hospital_id]) stockMap[b.hospital_id] = {};
+                const bg = b.blood_group || 'Unknown';
+                stockMap[b.hospital_id][bg] = (stockMap[b.hospital_id][bg] || 0) + avail;
+            }
+        });
+    }
+
     tbody.innerHTML = '';
     hospitals.forEach(h => {
         const isVerified = h.verified === true;
         const statusLabel = isVerified ? 'Approved' : 'Pending';
         const statusClass = isVerified ? 'approved' : 'pending';
+
+        const hStock = stockMap[h.id] || {};
+        const bgKeys = Object.keys(hStock);
+        let stockHtml = '';
+        if (bgKeys.length === 0) {
+            stockHtml = '<span style="color:#94a3b8; font-size:12px;">No Stock</span>';
+        } else {
+            stockHtml = bgKeys.map(bg => `<span style="display:inline-block; margin:2px; padding:3px 6px; font-size:11px; background:rgba(255, 71, 87, 0.1); color:#ff4757; border:1px solid rgba(255, 71, 87, 0.3); border-radius:4px; font-weight:bold;">${bg} (${hStock[bg]}u)</span>`).join(' ');
+        }
 
         tbody.innerHTML += `
             <tr>
@@ -268,7 +306,7 @@ async function loadHospitals() {
                 <td>${h.email || 'N/A'}</td>
                 <td>${h.city || 'N/A'}</td>
                 <td><span style="font-family:monospace; font-size:0.85rem;">${h.license_number || 'N/A'}</span></td>
-                <td><span class="badge completed">${h.type || 'Unknown'}</span></td>
+                <td>${stockHtml}</td>
                 <td><span class="badge ${statusClass}">${statusLabel}</span></td>
             </tr>
         `;
@@ -457,3 +495,134 @@ window.startSimulation = function () {
         simulateTraffic(); // Trigger first one immediately
     }
 }
+
+// ============================================================
+// GLOBAL BLOOD INVENTORY
+// ============================================================
+async function loadGlobalInventory() {
+    const grid = document.getElementById('inventory-grid');
+    const totalCountEl = document.getElementById('total-inventory-count');
+    if (!grid) return;
+
+    // Fetch all active inventory batches
+    const { data: batches, error } = await supabase
+        .from('inventory_batches')
+        .select('*')
+        .eq('is_recalled', false)
+        .gte('expiry_date', new Date().toISOString());
+
+    if (error) {
+        grid.innerHTML = '<p style="color:#ef4444; text-align:center; grid-column: 1 / -1;">Error loading inventory</p>';
+        return;
+    }
+
+    if (!batches || batches.length === 0) {
+        totalCountEl.textContent = '0 Units';
+        grid.innerHTML = '<p style="color:var(--text-muted); text-align:center; grid-column: 1 / -1;">No active inventory found in network</p>';
+        return;
+    }
+
+    const inventoryMap = { "A+": 0, "A-": 0, "B+": 0, "B-": 0, "AB+": 0, "AB-": 0, "O+": 0, "O-": 0 };
+    let totalNetworkUnits = 0;
+
+    batches.forEach(b => {
+        // Safe available logic: Total units - reserved units
+        const available = (b.units || 0) - (b.reserved_units || 0);
+        if (available > 0) {
+            const bg = b.blood_group || 'Unknown';
+            if (inventoryMap[bg] !== undefined) {
+                inventoryMap[bg] += available;
+            }
+            totalNetworkUnits += available;
+        }
+    });
+
+    totalCountEl.textContent = `${totalNetworkUnits} Units Total`;
+    grid.innerHTML = '';
+
+    const sortedGroups = Object.keys(inventoryMap);
+    sortedGroups.forEach(bg => {
+        const units = inventoryMap[bg];
+        const color = units >= 50 ? '#10b981' : (units > 10 ? '#f59e0b' : '#ef4444');
+        
+        grid.innerHTML += `
+            <div style="background: var(--bg-main); border: 1px solid var(--border-color); border-radius: 8px; padding: 15px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.02);">
+                <div style="font-size: 24px; font-weight: 800; color: var(--text-main); margin-bottom: 5px;">${bg}</div>
+                <div style="font-size: 18px; font-weight: 700; color: ${color};">${units}</div>
+                <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; margin-top: 4px;">Units</div>
+            </div>
+        `;
+    });
+}
+
+// ============================================================
+// PENDING ROUTINE TRANSFERS (Admin Override)
+// ============================================================
+async function loadPendingTransfers() {
+    const tbody = document.getElementById('pending-transfers-body');
+    const countEl = document.getElementById('pending-transfers-count');
+    if (!tbody) return;
+
+    const { data: allocs, error } = await supabase
+        .from('request_allocations')
+        .select('*, blood_requests(*)')
+        .eq('status', 'PENDING');
+
+    if (error) {
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:#ef4444;">Error loading transfers</td></tr>';
+        return;
+    }
+
+    if (!allocs || allocs.length === 0) {
+        if (countEl) countEl.textContent = '0';
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:var(--text-muted);">No pending routine transfers</td></tr>';
+        return;
+    }
+
+    if (countEl) countEl.textContent = allocs.length;
+
+    // Build hospital map for names
+    const hIds = new Set();
+    allocs.forEach(a => {
+        if (a.supplier_hospital_id) hIds.add(a.supplier_hospital_id);
+        if (a.blood_requests?.hospital_id) hIds.add(a.blood_requests.hospital_id);
+    });
+    const hMap = {};
+    if (hIds.size > 0) {
+        const { data: hData } = await supabase.from('hospitals').select('id, name').in('id', Array.from(hIds));
+        if (hData) hData.forEach(h => hMap[h.id] = h.name);
+    }
+
+    tbody.innerHTML = '';
+    allocs.forEach(a => {
+        const reqName = hMap[a.blood_requests?.hospital_id] || 'Unknown';
+        const supName = hMap[a.supplier_hospital_id] || 'Unknown';
+        const bg = a.blood_requests?.blood_group || 'Unknown';
+
+        tbody.innerHTML += `
+            <tr>
+                <td><span style="color:#20e3b2; font-weight:bold;">${reqName}</span></td>
+                <td><span style="color:white;">${supName}</span></td>
+                <td><strong style="color:#ff4757;">${bg}</strong></td>
+                <td><strong>${a.units_allocated}</strong> units</td>
+                <td>
+                    <button style="background:#10b981; border:none; color:white; padding:4px 8px; border-radius:4px; cursor:pointer; font-weight:bold; font-size:11px;" onclick="forceApproveTransfer('${a.id}')">FORCE APPROVE ⚡</button>
+                </td>
+            </tr>
+        `;
+    });
+}
+
+window.forceApproveTransfer = async function(allocId) {
+    if (!confirm("As Admin, force-approve this routine transfer and dispatch the blood?")) return;
+    
+    try {
+        const { error } = await supabase.rpc('rpc_accept_allocation', { p_id: allocId });
+        if (error) throw error;
+        
+        alert("Transfer successfully forced! Blood is now IN_TRANSIT.");
+        loadPendingTransfers(); // Refresh list
+    } catch (e) {
+        alert("Failed to force approve: " + e.message);
+    }
+};
