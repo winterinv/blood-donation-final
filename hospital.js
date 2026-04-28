@@ -436,34 +436,134 @@ window.fulfillGlobalRequest = async function(reqId) {
 // 5. Transactions Logic
 // ----------------------------------------------------
 function initTransactions() {
-    window.downloadPDF = (transferId, date, sender, receiver, bg, units, status) => {
-        const safeSender = decodeURIComponent(sender);
-        const safeReceiver = decodeURIComponent(receiver);
+    window.downloadPDF = (transferId, requestId, date, senderId, receiverId, bg, units, status) => {
+        const sender = window.HOSPITAL_DATA_MAP[senderId] || {name:'Unknown', address:'', contact_number:'', license_number:''};
+        const receiver = window.HOSPITAL_DATA_MAP[receiverId] || {name:'Unknown', address:'', contact_number:'', license_number:''};
         const printWindow = window.open('', '_blank');
+        
+        const bloodType = bg.replace(/[+-]/g, '');
+        const rhFactor = bg.includes('+') ? 'Positive (+)' : 'Negative (-)';
+
         printWindow.document.write(`
             <html><head><title>Transfer Receipt</title>
             <style>
-                body { font-family: Arial, sans-serif; padding: 40px; color: #333; }
-                .header { border-bottom: 2px solid #20e3b2; padding-bottom: 20px; margin-bottom: 30px; }
-                h1 { color: #ff4757; margin:0; }
-                .row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #eee; }
-                .label { font-weight: bold; color: #666; }
+                body { font-family: 'Times New Roman', Times, serif; padding: 20px; color: #000; font-size: 13px; line-height: 1.3; max-width: 800px; margin: 0 auto; }
+                .header-top { position: relative; margin-bottom: 10px; }
+                .header-center { text-align: center; }
+                .header-right { position: absolute; right: 0; top: 0; text-align: right; font-size: 12px; }
+                h1 { font-size: 18px; margin: 5px 0; font-weight: bold; text-transform: uppercase; }
+                h2 { font-size: 13px; margin: 0; font-weight: normal; font-style: italic; }
+                table { width: 100%; border-collapse: collapse; margin-bottom: 10px; border: 2px solid #000; }
+                th, td { border: 1px solid #000; padding: 4px 6px; text-align: left; vertical-align: top; }
+                .section-title { font-weight: bold; font-size: 13px; margin-top: 10px; margin-bottom: 2px; }
+                .table-header { font-weight: bold; text-align: center; }
+                .footer { text-align: center; font-size: 11px; margin-top: 20px; font-weight: bold; }
+                .sub-footer { text-align: center; font-size: 10px; }
             </style>
             </head><body>
-            <div class="header">
-                <h1>Blood Buddy - Transfer Document</h1>
-                <p>Official Transaction Receipt</p>
+            <div class="header-top">
+                <div class="header-center">
+                    <div>Government of India (Simulated Prototype Document)</div>
+                    <h1>Inter-Hospital Blood Transfer Request & Issue Form</h1>
+                    <h2>(For Coordination and Inventory Management Use Only)</h2>
+                </div>
+                <div class="header-right">
+                    Form Reference Number<br>Form No:
+                </div>
             </div>
-            <div class="row"><span class="label">Transfer ID</span><span>${transferId}</span></div>
-            <div class="row"><span class="label">Date</span><span>${date}</span></div>
-            <div class="row"><span class="label">Sender Hospital</span><span>${safeSender}</span></div>
-            <div class="row"><span class="label">Receiver Hospital</span><span>${safeReceiver}</span></div>
-            <div class="row"><span class="label">Blood Group</span><span style="font-size:20px; font-weight:bold; color:#ff4757;">${bg}</span></div>
-            <div class="row"><span class="label">Units</span><span>${units}</span></div>
-            <div class="row"><span class="label">Status</span><span>${status}</span></div>
-            <div style="margin-top: 50px; text-align:center; font-size:12px; color:#999;">
-                System Generated Document - Blood Donation Network
-            </div>
+
+            <div class="section-title">0. Unique Identifiers</div>
+            <table style="border-width: 1px;">
+                <tr>
+                    <td colspan="2" style="text-align: right;"><strong>Date & Time of Generation:</strong> ${date}</td>
+                </tr>
+                <tr>
+                    <td width="50%"><strong>Transfer ID:</strong> ${transferId}</td>
+                    <td width="50%"><strong>Request ID:</strong> ${requestId}</td>
+                </tr>
+            </table>
+
+            <div class="section-title">Section 1: Requesting Hospital Details</div>
+            <table style="border-width: 1px;">
+                <tr><td colspan="2">Hospital Name: ${receiver.name}</td></tr>
+                <tr><td colspan="2">Address: ${receiver.address || ''}</td></tr>
+                <tr>
+                    <td width="50%">Contact Number: ${receiver.contact_number || ''}</td>
+                    <td width="50%">License Number (as per Drugs & Cosmetics Act): ${receiver.license_number || ''}</td>
+                </tr>
+            </table>
+
+            <div class="section-title">Section 2: Supplying Hospital Details</div>
+            <table style="border-width: 1px;">
+                <tr><td colspan="2">Hospital Name: ${sender.name}</td></tr>
+                <tr><td colspan="2">Address: ${sender.address || ''}</td></tr>
+                <tr>
+                    <td width="50%">Contact Number: ${sender.contact_number || ''}</td>
+                    <td width="50%">License Number (as per Drugs & Cosmetics Act): ${sender.license_number || ''}</td>
+                </tr>
+            </table>
+
+            <div class="section-title">Section 3: Blood Component Details</div>
+            <table style="border-width: 1px;">
+                <tr>
+                    <th class="table-header">Blood Group</th>
+                    <th class="table-header">Rh Factor</th>
+                    <th class="table-header">Component Type<br>(RBC / Platelet / Plasma / Cryo)</th>
+                    <th class="table-header">Quantity<br>(Units)</th>
+                    <th class="table-header">Expiry Date</th>
+                </tr>
+                <tr>
+                    <td style="text-align: center; height: 25px;"><strong>${bloodType}</strong></td>
+                    <td style="text-align: center;">${rhFactor}</td>
+                    <td style="text-align: center;">Whole Blood</td>
+                    <td style="text-align: center;"><strong>${units}</strong></td>
+                    <td style="text-align: center;"></td>
+                </tr>
+                <tr><td style="height:20px;"></td><td></td><td></td><td></td><td></td></tr>
+                <tr><td style="height:20px;"></td><td></td><td></td><td></td><td></td></tr>
+            </table>
+
+            <div class="section-title">Section 4: Transfer Details</div>
+            <table style="border-width: 1px;">
+                <tr>
+                    <td>
+                        Approval Status: <strong>${status}</strong><br>
+                        Date of Approval: ${date}<br>
+                        Expected Dispatch Date: ${date}
+                    </td>
+                </tr>
+            </table>
+
+            <div class="section-title">Section 5. Authorization</div>
+            <table style="border-width: 1px;">
+                <tr>
+                    <td width="50%" class="table-header" style="text-align:center;">Authorized Signatory</td>
+                    <td width="50%" class="table-header" style="text-align:center;">System Administrator Approval</td>
+                </tr>
+                <tr>
+                    <td style="height: 50px;">Name:<br>Signature:<br>Stamp:</td>
+                    <td style="height: 50px;">Name:<br>Signature:</td>
+                </tr>
+            </table>
+
+            <div class="section-title">Section 6. Declaration</div>
+            <table style="margin-bottom: 5px; border-width: 1px;">
+                <tr>
+                    <td style="text-align: justify;">"This transfer is coordinated between licensed medical institutions. The receiving hospital is responsible for proper storage, handling, and clinical use of blood components in accordance with applicable guidelines under the Drugs and Cosmetics Act, 1940 and National Blood Policy of India."</td>
+                </tr>
+            </table>
+
+            <div class="section-title" style="margin-top: 5px;">Section 7. Audit Information</div>
+            <table style="border-width: 1px;">
+                <tr>
+                    <td width="33%">Generated By:</td>
+                    <td width="33%">Approved By:</td>
+                    <td width="33%">Timestamp: </td>
+                </tr>
+            </table>
+
+            <div class="footer">This is a system-generated document for coordination purposes only.</div>
+            <div class="sub-footer">Not a substitute for statutory blood requisition forms.<br>For academic and prototype demonstration use only.</div>
             <script>
                 window.onload = function() { window.print(); }
             </script>
@@ -507,7 +607,7 @@ async function loadTransactionsData() {
 
     const { data: txs, error } = await supabase
         .from('blood_transfers')
-        .select(`id, blood_group, units, status, created_at, sender_id, receiver_id`)
+        .select(`id, request_id, blood_group, units, status, created_at, sender_id, receiver_id`)
         .or(`sender_id.eq.${window.CURRENT_HOSPITAL_ID},receiver_id.eq.${window.CURRENT_HOSPITAL_ID}`)
         .order('created_at', { ascending: false });
 
@@ -525,9 +625,10 @@ async function loadTransactionsData() {
     const hMap = {};
     
     if (validIds.length > 0) {
-        const { data: hData } = await supabase.from('hospitals').select('id, name').in('id', validIds);
-        if (hData) hData.forEach(h => hMap[h.id] = h.name);
+        const { data: hData } = await supabase.from('hospitals').select('id, name, address, contact_number, license_number').in('id', validIds);
+        if (hData) hData.forEach(h => hMap[h.id] = h);
     }
+    window.HOSPITAL_DATA_MAP = hMap;
 
     tbody.innerHTML = "";
 
@@ -544,7 +645,7 @@ async function loadTransactionsData() {
     txs.forEach(t => {
         const isSender = t.sender_id === window.CURRENT_HOSPITAL_ID;
         const myRole = isSender ? `<span style="background:#ff4757; color:white; padding:2px 6px; border-radius:4px; font-size:10px;">OUTGOING</span>` : `<span style="background:#20e3b2; color:black; padding:2px 6px; border-radius:4px; font-size:10px;">INCOMING</span>`;
-        const theirName = isSender ? hMap[t.receiver_id] : hMap[t.sender_id];
+        const theirName = isSender ? (hMap[t.receiver_id]?.name || 'Unknown') : (hMap[t.sender_id]?.name || 'Unknown');
 
         const statColor = t.status === 'COMPLETED' ? '#20e3b2' : (t.status === 'IN_TRANSIT' ? '#facc15' : 'white');
 
@@ -557,7 +658,7 @@ async function loadTransactionsData() {
                 <td><strong style="color:white;">${t.blood_group}</strong> (${t.units}u)</td>
                 <td><strong style="color:${statColor};">${t.status}</strong></td>
                 <td>
-                    <button style="background:transparent; border:1px solid white; color:white; font-size:11px; padding:2px 6px; cursor:pointer;" onclick="downloadPDF('${t.id}', '${new Date(t.created_at).toLocaleDateString()}', encodeURIComponent('${(hMap[t.sender_id] || 'Unknown').replace(/'/g, "\\'")}'), encodeURIComponent('${(hMap[t.receiver_id] || 'Unknown').replace(/'/g, "\\'")}'), '${t.blood_group}', ${t.units}, '${t.status}')">PDF</button>
+                    <button style="background:transparent; border:1px solid white; color:white; font-size:11px; padding:2px 6px; cursor:pointer;" onclick="downloadPDF('${t.id}', '${t.request_id}', '${new Date(t.created_at).toLocaleDateString()}', '${t.sender_id}', '${t.receiver_id}', '${t.blood_group}', ${t.units}, '${t.status}')">PDF</button>
                     ${(!isSender && t.status === 'IN_TRANSIT') ? `<button style="background:#20e3b2; border:none; color:black; font-weight:bold; font-size:11px; padding:3px 8px; border-radius:4px; cursor:pointer; margin-left:5px;" onclick="markReceived('${t.id}', '${t.blood_group}', ${t.units})">Receive 📥</button>` : ''}
                 </td>
             </tr>

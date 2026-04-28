@@ -1,6 +1,21 @@
 /* index.css specific overrides for Homepage */
 @import url('theme.css');
 
+.preloader {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background: #111;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 99999;
+  transition: opacity 0.5s ease;
+  pointer-events: none;
+}
+
 body {
   background: var(--bg-main);
   overflow-x: hidden;

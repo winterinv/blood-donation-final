@@ -86,6 +86,12 @@ document.querySelector("#hospitalForm").addEventListener("submit", async (e) => 
   const licenseNumber = document.querySelector("#licenseNumber").value.trim();
   const licenseFile = document.querySelector("#licenseFile").files[0];
 
+  // Basic empty field validation
+  if (!email || !password || !name || !address || !city || !contact || !type || !licenseNumber) {
+    showStatus("Please fill in all required fields.", "error");
+    return;
+  }
+
   // Validate license file
   if (!licenseFile) {
     showStatus("Please upload your license document (PDF).", "error");

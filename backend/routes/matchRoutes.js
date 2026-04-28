@@ -278,7 +278,9 @@ router.post('/fulfill-global', async (req, res) => {
             
             allocations.push({
                 request_id: request_id,
+                supplier_id: supplier_hospital_id,
                 supplier_hospital_id: supplier_hospital_id,
+                blood_group: bReq.blood_group,
                 batch_id: b.id,
                 units_allocated: take,
                 status: 'PENDING'
